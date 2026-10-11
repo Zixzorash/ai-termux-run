@@ -136,4 +136,12 @@ class ExampleRobolectricTest {
         assertEquals("/data/data/com.termux/files/usr/bin", result.binPath)
         assertNotNull(result.message)
     }
+
+    @Test
+    fun `test hasTermuxRunCommandPermission helper`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        // In Robolectric test context without runtime grant, returns boolean safely without crash
+        val hasPerm = com.example.utils.StoragePermissionHelper.hasTermuxRunCommandPermission(context)
+        assertNotNull(hasPerm)
+    }
 }

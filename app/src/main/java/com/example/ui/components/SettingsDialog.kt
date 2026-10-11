@@ -1,7 +1,11 @@
 package com.example.ui.components
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.os.Build
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -242,6 +246,7 @@ fun SettingsDialog(
                 Spacer(modifier = Modifier.height(8.dp))
 
                 // Option 2: Termux RUN_COMMAND Service
+                val hasTermuxRunPerm = StoragePermissionHelper.hasTermuxRunCommandPermission(context)
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -254,27 +259,98 @@ fun SettingsDialog(
                             MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
                     )
                 ) {
-                    Row(
-                        modifier = Modifier.padding(12.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            imageVector = if (defaultEngine == "TERMUX_SERVICE") Icons.Default.RadioButtonChecked else Icons.Default.RadioButtonUnchecked,
-                            contentDescription = null,
-                            tint = if (defaultEngine == "TERMUX_SERVICE") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Column {
-                            Text(
-                                text = "ส่งคำสั่งไปยัง Termux (RUN_COMMAND Intent)",
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 13.sp
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = if (defaultEngine == "TERMUX_SERVICE") Icons.Default.RadioButtonChecked else Icons.Default.RadioButtonUnchecked,
+                                contentDescription = null,
+                                tint = if (defaultEngine == "TERMUX_SERVICE") MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                             )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column {
+                                Text(
+                                    text = "ส่งคำสั่งไปยัง Termux (RUN_COMMAND Intent)",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 13.sp
+                                )
+                                Text(
+                                    text = "ส่งคำสั่งอัตโนมัติไปยัง Service ของ Termux เพื่อเปิดหน้าต่างและประมวลผลทันที",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        // Permission status badge & action
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = if (hasTermuxRunPerm) Color(0xFF065F46).copy(alpha = 0.2f) else Color(0xFF7F1D1D).copy(alpha = 0.2f),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Icon(
+                                        imageVector = if (hasTermuxRunPerm) Icons.Outlined.CheckCircle else Icons.Outlined.Warning,
+                                        contentDescription = null,
+                                        tint = if (hasTermuxRunPerm) Color(0xFF10B981) else Color(0xFFF87171),
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = if (hasTermuxRunPerm)
+                                            "สิทธิ์ RUN_COMMAND: ได้รับอนุญาตแล้ว (ส่งคำสั่งอัตโนมัติได้)"
+                                        else
+                                            "สิทธิ์ RUN_COMMAND: ยังไม่ได้รับอนุญาต (ต้องเปิดในข้อมูลแอพ)",
+                                        fontSize = 11.sp,
+                                        color = if (hasTermuxRunPerm) Color(0xFF10B981) else Color(0xFFF87171)
+                                    )
+                                }
+                                if (!hasTermuxRunPerm) {
+                                    OutlinedButton(
+                                        onClick = {
+                                            context.startActivity(StoragePermissionHelper.createAppDetailsSettingsIntent(context))
+                                        },
+                                        shape = RoundedCornerShape(6.dp)
+                                    ) {
+                                        Text("เปิดตั้งค่า", fontSize = 10.sp)
+                                    }
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(6.dp))
+
+                        // Hint for allow-external-apps
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
                             Text(
-                                text = "ส่ง Intent ไปให้ Service ของ Termux ทำงานในสภาพแวดล้อม Termux จริง",
-                                fontSize = 11.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                text = "💡 ต้องมี allow-external-apps=true ใน Termux",
+                                fontSize = 10.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.weight(1f)
                             )
+                            OutlinedButton(
+                                onClick = {
+                                    val clip = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                    clip.setPrimaryClip(ClipData.newPlainText("Termux Config", "echo 'allow-external-apps=true' >> ~/.termux/termux.properties && termux-reload-settings"))
+                                    Toast.makeText(context, "คัดลอกคำสั่งเปิด allow-external-apps แล้ว", Toast.LENGTH_SHORT).show()
+                                },
+                                shape = RoundedCornerShape(6.dp)
+                            ) {
+                                Text("คัดลอกคำสั่งตั้งค่า", fontSize = 10.sp)
+                            }
                         }
                     }
                 }

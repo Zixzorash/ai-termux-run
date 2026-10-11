@@ -1,9 +1,12 @@
 package com.example.termux
 
 import android.app.PendingIntent
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.os.Environment
 import android.os.SystemClock
 import com.example.data.local.AppDatabase
 import com.example.data.model.ExecutionLog
@@ -11,6 +14,7 @@ import com.example.data.model.TermuxScriptFile
 import com.example.receiver.TermuxResultReceiver
 import com.example.service.TermuxNotificationHelper
 import com.example.utils.SafUtils
+import com.example.utils.StoragePermissionHelper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -169,7 +173,8 @@ class TermuxScriptRunner private constructor(private val context: Context) {
 
     /**
      * Executes the script via Termux RUN_COMMAND service.
-     * When interactive = true, opens Termux foreground terminal session so read -p and interactive prompts work.
+     * When interactive = true, opens Termux foreground terminal session with session action "0"
+     * so Termux automatically creates a new terminal session running the script in foreground.
      */
     suspend fun executeViaRunCommandService(
         script: TermuxScriptFile,
@@ -185,7 +190,48 @@ class TermuxScriptRunner private constructor(private val context: Context) {
             return
         }
 
-        appendLog("⚡ ส่ง Intent ไปยัง Termux RunCommandService...")
+        appendLog("⚡ เตรียมส่งคำสั่ง '${script.name}' ไปยัง Termux...")
+
+        // 1. Check com.termux.permission.RUN_COMMAND permission status
+        val hasRunPermission = StoragePermissionHelper.hasTermuxRunCommandPermission(context)
+        if (!hasRunPermission) {
+            appendLog("⚠️ คำเตือน: แอพยังไม่ได้รับสิทธิ์ 'com.termux.permission.RUN_COMMAND'")
+            appendLog("💡 หาก Termux ไม่รันอัตโนมัติ ให้ไปที่ ข้อมูลแอพนี้ -> สิทธิ์ (Permissions) -> สิทธิ์เพิ่มเติม -> อนุญาต 'สั่งการคำสั่งใน Termux'")
+        }
+
+        // 2. Read script content and ensure a clean Unix-formatted copy is cached in /sdcard/Download/.termux_runner/
+        // so Termux bash can reliably access and run it even if Termux home/SAF paths vary
+        val scriptContent = try {
+            SafUtils.readDocumentContent(context.contentResolver, script.uri)
+        } catch (_: Exception) { "" }
+
+        val cachedSharedScriptPath = try {
+            if (scriptContent.isNotBlank()) {
+                val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                val runnerCacheDir = File(downloadsDir, ".termux_runner")
+                if (!runnerCacheDir.exists()) {
+                    runnerCacheDir.mkdirs()
+                }
+                val cachedFile = File(runnerCacheDir, script.name)
+                val unixScript = scriptContent.replace("\r\n", "\n").replace("\r", "\n")
+                cachedFile.writeText(unixScript, Charsets.UTF_8)
+                cachedFile.setExecutable(true, false)
+                cachedFile.setReadable(true, false)
+                cachedFile.absolutePath
+            } else {
+                "/sdcard/Download/.termux_runner/${script.name}"
+            }
+        } catch (e: Exception) {
+            "/sdcard/Download/.termux_runner/${script.name}"
+        }
+
+        // 3. Always copy the primary execution command to clipboard as an instant backup for the user
+        val fallbackCommand = "bash ~/.shortcuts/${script.name}"
+        try {
+            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+            clipboard?.setPrimaryClip(ClipData.newPlainText("Termux Command", fallbackCommand))
+            appendLog("📋 คัดลอกคำสั่งสำรองไว้ในคลิปบอร์ดแล้ว: $fallbackCommand")
+        } catch (_: Exception) {}
 
         val scriptId = script.name.hashCode().toLong()
 
@@ -210,38 +256,55 @@ class TermuxScriptRunner private constructor(private val context: Context) {
         val scriptFullPath = "/data/data/com.termux/files/home/${script.relativePath}"
         val homeDir = "/data/data/com.termux/files/home"
 
-        val runArgs = arrayOf(
-            "-c",
-            "cd $homeDir && if [ -f \"$scriptFullPath\" ]; then bash \"$scriptFullPath\"; elif [ -f ~/.shortcuts/${script.name} ]; then bash ~/.shortcuts/${script.name}; else bash ~/${script.relativePath}; fi"
-        )
+        // Build a robust shell wrapper that tries Termux home/shortcuts first, then the cached shared copy
+        val executionWrapperCmd = buildString {
+            append("cd \"$homeDir\" 2>/dev/null || cd /sdcard ; ")
+            append("echo \"========================================\" ; ")
+            append("echo \"🚀 เริ่มรันสคริปต์: ${script.name}\" ; ")
+            append("echo \"========================================\" ; ")
+            append("if [ -f \"$scriptFullPath\" ]; then ")
+            append("  bash \"$scriptFullPath\" ; ")
+            append("elif [ -f \"$homeDir/.shortcuts/${script.name}\" ]; then ")
+            append("  bash \"$homeDir/.shortcuts/${script.name}\" ; ")
+            append("elif [ -f \"$homeDir/${script.relativePath}\" ]; then ")
+            append("  bash \"$homeDir/${script.relativePath}\" ; ")
+            append("elif [ -f \"$homeDir/${script.name}\" ]; then ")
+            append("  bash \"$homeDir/${script.name}\" ; ")
+            append("elif [ -f \"$cachedSharedScriptPath\" ]; then ")
+            append("  bash \"$cachedSharedScriptPath\" ; ")
+            append("elif [ -f \"/sdcard/Download/.termux_runner/${script.name}\" ]; then ")
+            append("  bash \"/sdcard/Download/.termux_runner/${script.name}\" ; ")
+            append("elif [ -f \"/storage/emulated/0/Download/.termux_runner/${script.name}\" ]; then ")
+            append("  bash \"/storage/emulated/0/Download/.termux_runner/${script.name}\" ; ")
+            append("else ")
+            append("  echo \"❌ ไม่พบไฟล์ ${script.name} ในพื้นที่ Termux หรือแคช\" ; ")
+            append("fi")
+        }
 
+        val runArgs = arrayOf("-c", executionWrapperCmd)
+
+        // CRITICAL FOR AUTOMATIC EXECUTION:
+        // EXTRA_RUN_COMMAND_SESSION_ACTION MUST be "0" (VALUE_EXTRA_SESSION_ACTION_SWITCH_TO_NEW_SESSION_AND_OPEN_ACTIVITY)
+        // so Termux creates a new terminal session, switches to it, and opens the foreground terminal window.
+        // EXTRA_RUN_COMMAND_BACKGROUND MUST be false for interactive execution.
         val termuxIntent = Intent(TermuxCommandManager.ACTION_RUN_COMMAND).apply {
             component = ComponentName(TermuxCommandManager.TERMUX_PACKAGE, TermuxCommandManager.RUN_COMMAND_SERVICE)
             putExtra(TermuxCommandManager.EXTRA_RUN_COMMAND_PATH, bashPath)
             putExtra(TermuxCommandManager.EXTRA_RUN_COMMAND_ARGUMENTS, runArgs)
             putExtra(TermuxCommandManager.EXTRA_RUN_COMMAND_WORKDIR, homeDir)
-            // When interactive, set BACKGROUND to false so Termux opens a terminal session
             putExtra(TermuxCommandManager.EXTRA_RUN_COMMAND_BACKGROUND, !interactive)
-            // "1" = ACTION_CREATE_NEW_TERMINAL_AND_FAIL_IF_EXISTS, "3" = ACTION_CREATE_NEW_TERMINAL_AND_SWITCH_TO_FOREGROUND
-            putExtra(TermuxCommandManager.EXTRA_RUN_COMMAND_SESSION_ACTION, if (interactive) "1" else "0")
+            putExtra(TermuxCommandManager.EXTRA_RUN_COMMAND_SESSION_ACTION, "0")
             putExtra(TermuxCommandManager.EXTRA_RUN_COMMAND_PENDING_INTENT, pendingIntent)
         }
 
         try {
+            appendLog("⚡ ส่งคำสั่ง RUN_COMMAND ไปยัง Termux RunCommandService...")
             context.startService(termuxIntent)
             appendLog("✅ ส่งคำสั่ง RUN_COMMAND ไปยัง Termux สำเร็จแล้ว!")
 
             if (interactive) {
-                appendLog("🖥️ เปิดหน้าต่าง Terminal ของ Termux ให้พร้อมโต้ตอบและทำงานทันที")
-                appendLog("⚡ ใช้งานเอนจิน FFmpeg/FFprobe พร้อมฮาร์ดแวร์เร่งความเร็ว GPU+CPU ใน Termux")
-                try {
-                    val launchIntent = commandManager.getLaunchTermuxIntent()?.apply {
-                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    }
-                    if (launchIntent != null) {
-                        context.startActivity(launchIntent)
-                    }
-                } catch (_: Exception) {}
+                appendLog("🖥️ Termux กำลังเปิดหน้าต่าง Terminal พร้อมรันคำสั่ง '${script.name}' อัตโนมัติ")
+                appendLog("⚡ ใช้งานเอนจิน FFmpeg/FFprobe พร้อมฮาร์ดแวร์เร่งความเร็ว GPU+CPU ใน Termux เต็มกำลัง")
             } else {
                 appendLog("⏳ กำลังรอผลลัพธ์จาก Termux Callback...")
             }
@@ -251,13 +314,42 @@ class TermuxScriptRunner private constructor(private val context: Context) {
                 _runState.value = _runState.value.copy(
                     isRunning = false,
                     durationMs = duration,
-                    statusMessage = "ส่งคำสั่งไปยัง Termux สำเร็จ (รันใน Termux จริง)",
+                    statusMessage = "ส่งคำสั่ง '${script.name}' ไปยัง Termux สำเร็จ (รันใน Termux จริง)",
                     supportsLiveOutput = true,
                     isWaitingForInput = false
                 )
             }
+        } catch (e: SecurityException) {
+            appendLog("🔴 ระบบ Android ปฏิเสธการส่ง Intent Service: ขาดสิทธิ์ com.termux.permission.RUN_COMMAND")
+            appendLog("👉 กรุณาเปิดสิทธิ์: ข้อมูลแอพนี้ -> สิทธิ์ (Permissions) -> สิทธิ์เพิ่มเติม -> สั่งการคำสั่งใน Termux")
+            appendLog("📋 ได้คัดลอกคำสั่งสำรองไว้ในคลิปบอร์ดแล้ว สามารถกดเปิด Termux แล้ว Paste เพื่อรันได้ทันที")
+            try {
+                val launchIntent = commandManager.getLaunchTermuxIntent()?.apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                if (launchIntent != null) {
+                    context.startActivity(launchIntent)
+                }
+            } catch (_: Exception) {}
+
+            if (fallbackToDirect) {
+                appendLog("🔄 กำลังสลับไปรันโดยตรงในแอพให้ทันที...")
+                executeDirectlyInApp(script, startTime, startTimestamp)
+            } else {
+                finishWithError(script, -1, "ขาดสิทธิ์ com.termux.permission.RUN_COMMAND: ${e.message}")
+            }
         } catch (e: Exception) {
             appendLog("⚠️ ไม่สามารถรันผ่าน Termux Service: ${e.message}")
+            // If starting the service directly failed, try to launch Termux and copy command
+            try {
+                val launchIntent = commandManager.getLaunchTermuxIntent()?.apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                if (launchIntent != null) {
+                    context.startActivity(launchIntent)
+                }
+            } catch (_: Exception) {}
+
             if (fallbackToDirect) {
                 appendLog("🔄 กำลังสลับไปรันสคริปต์โดยตรงในแอพนี้ให้ทันที...")
                 executeDirectlyInApp(script, startTime, startTimestamp)

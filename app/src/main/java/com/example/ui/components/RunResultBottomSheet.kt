@@ -494,6 +494,13 @@ fun RunResultBottomSheet(
 
                     OutlinedButton(
                         onClick = {
+                            val activeScript = state.activeScriptFile
+                            if (activeScript != null) {
+                                val fullCommand = "bash ~/.shortcuts/${activeScript.name}"
+                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                clipboard.setPrimaryClip(ClipData.newPlainText("Termux Command", fullCommand))
+                                Toast.makeText(context, "คัดลอกคำสั่ง ${activeScript.name} ลงคลิปบอร์ดแล้ว พร้อมเปิด Termux", Toast.LENGTH_SHORT).show()
+                            }
                             val launchIntent = TermuxCommandManager(context).getLaunchTermuxIntent()
                             if (launchIntent != null) {
                                 launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)

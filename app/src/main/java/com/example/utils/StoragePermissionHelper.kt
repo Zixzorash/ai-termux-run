@@ -49,6 +49,16 @@ object StoragePermissionHelper {
     }
 
     /**
+     * Checks if the app has permission to execute commands via Termux service (com.termux.permission.RUN_COMMAND).
+     */
+    fun hasTermuxRunCommandPermission(context: Context): Boolean {
+        return ContextCompat.checkSelfPermission(
+            context,
+            "com.termux.permission.RUN_COMMAND"
+        ) == PackageManager.PERMISSION_GRANTED
+    }
+
+    /**
      * Checks if the app has media or standard storage permissions.
      */
     fun hasMediaPermissions(context: Context): Boolean {

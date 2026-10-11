@@ -44,6 +44,11 @@ class MainActivity : ComponentActivity() {
                     viewModel.refreshStoragePermissions()
                 }
 
+                // Request Termux RUN_COMMAND Permission on launch if needed
+                val termuxPermissionLauncher = rememberLauncherForActivityResult(
+                    contract = ActivityResultContracts.RequestPermission()
+                ) { /* Handle grant */ }
+
                 LaunchedEffect(Unit) {
                     // Check notifications
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -63,6 +68,15 @@ class MainActivity : ComponentActivity() {
                     }
                     if (ungrantedPerms.isNotEmpty()) {
                         storagePermissionLauncher.launch(ungrantedPerms.toTypedArray())
+                    }
+
+                    // Prompt Termux RUN_COMMAND permission if Termux is installed and not granted
+                    if (com.example.termux.TermuxCommandManager(this@MainActivity).checkTermuxInstallation() !is com.example.termux.TermuxVersionInfo.NotInstalled) {
+                        if (!com.example.utils.StoragePermissionHelper.hasTermuxRunCommandPermission(this@MainActivity)) {
+                            try {
+                                termuxPermissionLauncher.launch("com.termux.permission.RUN_COMMAND")
+                            } catch (_: Exception) {}
+                        }
                     }
                 }
 
